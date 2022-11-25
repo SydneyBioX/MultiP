@@ -1,0 +1,383 @@
+---
+title: "MultiP Demonstration on BioHEART cohort"
+author: "Andy Tran, Andy Wang & Jamie Mickaill"
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+output:
+  html_document:
+    code_folding: hide
+    number_sections: yes
+    toc: yes
+    toc_float:
+      collapsed: yes
+      smooth_scroll: no
+always_allow_html: true
+---
+
+```{r setup}
+knitr::opts_chunk$set(echo = TRUE)
+
+suppressPackageStartupMessages({
+  library(MultiAssayExperiment)
+  library(tidyverse)
+  library(tictoc)
+  library(ClassifyR)
+  library(knitr)
+})
+```
+
+
+# BioHEART
+
+```{r, eval = TRUE}
+dataDirBioHeart = "data/MultiAssayExperiment_PLM_20210519_ageCorrected.RDATA"
+
+load(dataDirBioHeart)
+
+bioheart_mae = c(bioheart_mae, 
+                 Lipidomics = bioheart_mae@ExperimentList[["Lipidomics_totals"]], 
+                 mapFrom = "Lipidomics_totals")
+
+bioheart_mae <- mergeReplicates(intersectColumns(bioheart_mae))
+bioheart_mae$CAD <- factor(as.numeric(bioheart_mae$Gensini > 0), levels = c(0,1), labels = c("nonCAD", "CAD"))
+classes <- "CAD"
+
+clinical <- readxl::read_excel("data/BioCT-DL_20220209.xlsx")
+# load("data/FRS_data.RData")
+#   
+# ## filter out statin
+# clinical <- filter(clinical, record_id %in% dat_FRS$record_id)
+# identical(clinical$record_id, dat_FRS$record_id)
+# clinical$FRS <- dat_FRS$cvd_FRS
+# summary(clinical$FRS)
+# clinical <- filter(clinical, FRS < 0.2)
+clinical <- filter(clinical, statin == 0)
+
+mae_id <- rownames(colData(bioheart_mae))
+keep_id <- which(clinical$record_id %in% mae_id)
+
+keep_clin_features <- c("height", "smurfs", "cvhx_dm", "cvhx_htn", "cvhx_hcl_sr_or_statin", "cvhx_hcl_sr", "cvhx_rhythm_af", "cvhx_cardiacprob_other", "mhx_arthritis", "mhx_arthritis_osteo", "mhx_arthritis_gout", "mhx_other", "noac", "anti_coag", "asa", "anti_plt", "statin", "bblocker", "ace_arb", "ace_i", "arb", "ccb", "diuretic", "ppi", "anti_diab", "smoking_status", "signif_smok", "curr_smok", "drinking_status", "sx_cp", "sx_sob", "sbp", "dbp", "hr", "ctca_ind_gen_cv_assessment", "ctca_ind_sx", "ctca_ind_ecg", "ctca_ind_fh_ihd", "ctca_ind_other", "age", "gender", "record_id")
+
+clinical <- clinical[keep_id,keep_clin_features] %>% na.omit()
+sample_ids <- clinical$record_id
+clinical$record_id <- NULL
+
+remove_variables <- which(colMeans(clinical) < 0.05)
+if(length(remove_variables > 0)){clinical <- clinical[,-remove_variables]} ## filter out rare things
+
+keep_mae_inds <- which(rownames(colData(bioheart_mae)) %in% sample_ids)
+bioheart_mae <- bioheart_mae[,keep_mae_inds,]
+
+clinical$CAD <- bioheart_mae$CAD
+rownames(clinical) <- sample_ids
+colData(bioheart_mae) <- DataFrame(clinical)
+
+source("./MultiP-algm.R")
+source("./MultiP-summary.R")
+
+MultiAssayExperiment = bioheart_mae
+
+platformList = c("clinical", "Metabolomics", "Proteomics", "Lipidomics")
+platformUnitCosts = c(30, 15, 75, 50)
+
+# properties = c("TSA.retained", "Cost.Total", "Cost.Total2")
+# properties_direction = c("high", "low", "low") # best outcome of property
+# weights = c(0.4, 0.4, 0.2)
+# platformUnitCosts2 = c(10, 20, 40, 50)
+
+properties = c("TSA.retained", "Cost.Total")
+properties_direction = c("high", "low") # best outcome of property
+weights = c(0.5, 0.5)
+
+confidenceCutoff = 0.1
+
+characteristics = NULL
+seed=1
+verbose=0
+
+fixedPlatforms = 1
+minPlatformSize = 10
+performanceType = "Sample Error"
+
+crossValParams = CrossValParams(
+    samplesSplits = "Permute k-Fold",
+    permutations = 50,
+    folds = 2,
+    parallelParams = SnowParam(workers = 2, RNGseed = 1)
+)
+
+modellingParams = ModellingParams(
+    balancing = "none",
+    transformParams  = NULL,
+    selectParams = SelectParams("t-test"),
+    trainParams = TrainParams("DLDA"),
+    predictParams = PredictParams("DLDA"),
+    doImportance = FALSE
+)
+```
+
+
+# Main Code
+
+```{r main, message = FALSE, warning = FALSE}
+#filter NA's for class
+classColumn = grep(classes, colnames(colData(MultiAssayExperiment)))
+retainList = as.vector(!is.na(colData(MultiAssayExperiment)[classColumn]))
+MultiAssayExperiment = MultiAssayExperiment[,retainList & !is.na(retainList),]
+
+#Subset specified experiments from platformList 
+MultiAssayExperiment = MultiAssayExperiment[,,platformList[platformList != "clinical"]]
+
+#Subset complete cases only for all assays
+MultiAssayExperiment = MultiAssayExperiment[,complete.cases(MultiAssayExperiment),]
+
+dim(colData(MultiAssayExperiment))
+```
+
+```{r}
+tic()
+MultiPresults = MultiP.algm(MultiAssayExperiment,
+                        platformList,fixedPlatforms,confidenceCutoff,
+                        platformUnitCosts = platformUnitCosts , performanceType = performanceType,
+                        classes = classes, crossValParams = crossValParams, modellingParams = modellingParams, characteristics = characteristics, minPlatformSize = minPlatformSize, seed = seed, verbose = verbose)
+
+# MultiPresults = MultiP.algm(MultiAssayExperiment,
+#                         platformList,fixedPlatforms,confidenceCutoff,
+#                         platformUnitCosts = platformUnitCosts , performanceType = performanceType, platformUnitCosts2 = platformUnitCosts2,
+#                         properties = properties, properties_direction = properties_direction, weights = weights,
+#                         classes = classes, crossValParams = crossValParams, modellingParams = modellingParams, characteristics = characteristics, minPlatformSize = minPlatformSize, seed, verbose)
+toc()
+```
+
+# Diagnostics
+
+## Table
+```{r}
+summaryTable(MultiPresults)
+```
+
+
+## Bubble plot
+```{r}
+bubblePlot(MultiPresults, nVis = 8)
+```
+
+
+## Strata plot
+```{r}
+top_sequence = topBAccSequence(MultiPresults)
+strataPlot(MultiPresults, top_sequence)
+```
+
+## Flow Chart
+```{r}
+top_sequence = topBAccSequence(MultiPresults)
+flowChart(MultiPresults, top_sequence)
+```
+
+## Cohort Summary
+
+```{r}
+bioheart_categorical_features <- c("cvhx_htn", "cvhx_hcl_sr", "smoking_status",  "drinking_status", "gender")
+
+for(feature in bioheart_categorical_features){
+  colData(MultiPresults$MultiAssayExperiment)[,feature] = factor(colData(MultiPresults$MultiAssayExperiment)[,feature])
+}
+```
+
+### stage 1
+```{r}
+top_sequence = topBAccSequence(MultiPresults)
+platform_of_interest = strsplit(top_sequence, "-")[[1]][1]
+variables_of_interest = c("height", "smurfs", "cvhx_htn", "cvhx_hcl_sr", "smoking_status",  "drinking_status", "sbp", "dbp", "hr", "age", "gender")
+cohortSummary(MultiPresults, top_sequence, platform_of_interest, variables_of_interest = variables_of_interest)
+```
+
+
+### stage 2
+```{r}
+platform_of_interest = strsplit(top_sequence, "-")[[1]][2]
+cohortSummary(MultiPresults, top_sequence, platform_of_interest, variables_of_interest = variables_of_interest)
+```
+
+### stage 3
+```{r}
+platform_of_interest = strsplit(top_sequence, "-")[[1]][3]
+cohortSummary(MultiPresults, top_sequence, platform_of_interest, variables_of_interest = variables_of_interest)
+```
+
+## feature importance
+```{r}
+feat = platformList[1]
+featureImportance(MultiPresults, feat, 20)
+
+feat = platformList[2]
+featureImportance(MultiPresults, feat, 20)
+
+feat = platformList[3]
+featureImportance(MultiPresults, feat, 20)
+
+feat = platformList[4]
+featureImportance(MultiPresults, feat, 20)
+```
+
+
+## Baseline
+
+```{r}
+pathway_tests <- sapply(MultiPresults$Results.stratification, function(x) dim(x)[1])
+MultiP_ba_df <- data.frame(platform = abbreviate(MultiPresults$TSER.summary$Platform.Sequence), 
+                         balanced_acc = MultiPresults$TSER.summary$balancedAcc,
+                         type = "Pathway",
+                         tests = pathway_tests) %>% arrange(-balanced_acc)
+```
+
+```{r}
+BAs <- c()
+for(platform in platformList){
+results <-  modelsPredict(MultiAssayExperiment,
+                         MultiPresults$generatedModelsResults,
+                         platform,
+                         classes, 
+                         minPlatformSize,
+                         verbose)
+predict_class <- results$SSER$predict_class
+true_class <- as.character(colData(MultiAssayExperiment)[,classes])
+BA <- balanced_accuracy(true_class, predict_class)
+BAs <- c(BAs, BA)
+print(paste0("Platform: ", platform, 
+             ", Accuracy:", round(mean(true_class == predict_class),3),
+             ", Balanced Accuracy:", round(BA,3)))
+}
+
+baseline_ba_df <- data.frame(platform = platformList, 
+                             balanced_acc = BAs, 
+                             type = "Single", 
+                             tests = nrow(colData(MultiAssayExperiment)))
+baseline_ba_df
+```
+
+
+```{r, eval = F}
+clinmap <- data.frame(primary = rownames(colData(MultiAssayExperiment)),
+    colname = rownames(colData(MultiAssayExperiment)), stringsAsFactors = FALSE)
+listmap <- list(clinical = clinmap)
+dfmap <- listToMap(listmap)
+
+clin_data <- colData(MultiAssayExperiment) 
+clin_data <- clin_data %>% as.matrix %>% t
+
+MultiAssayExperiment_withClin = c(MultiAssayExperiment, 
+         clinical = clin_data, 
+         sampleMap = dfmap)
+
+MultiAssayExperiment_withClin@ExperimentList
+MultiAssayExperiment_withClin@sampleMap
+
+tic()
+prevalidated_results_crossvalidate <- crossValidate(
+  MultiAssayExperiment_withClin,
+  outcome = classes,
+  selectionMethod = "t-test",
+  selectionOptimisation = "Resubstitution",
+  classifier = "DLDA",
+  multiViewMethod = "prevalidation",
+  assayCombinations = "all",
+  nFolds = 2,
+  nRepeats = 50,
+  nCores = 1
+)
+toc()
+
+tic()
+merge_results_crossvalidate <- crossValidate(
+  MultiAssayExperiment_withClin,
+  outcome = classes,
+  selectionMethod = "t-test",
+  selectionOptimisation = "Resubstitution",
+  classifier = "DLDA",
+  multiViewMethod = "merge",
+  assayCombinations = "all",
+  nFolds = 2,
+  nRepeats = 50,
+  nCores = 1
+)
+toc()
+
+tic()
+PCA_results_crossvalidate <- crossValidate(
+  MultiAssayExperiment_withClin,
+  outcome = classes,
+  selectionMethod = "t-test",
+  selectionOptimisation = "Resubstitution",
+  classifier = "DLDA",
+  multiViewMethod = "PCA",
+  assayCombinations = "all",
+  nFolds = 2,
+  nRepeats = 50,
+  nCores = 1
+)
+toc()
+
+saveRDS(prevalidated_results_crossvalidate, "BioHEART_prevalidated_results.rds")
+saveRDS(merge_results_crossvalidate, "BioHEART_merge_results.rds")
+saveRDS(PCA_results_crossvalidate, "BioHEART_PCA_results.rds")
+```
+
+```{r, eval = T}
+prevalidated_results_crossvalidate <- readRDS("BioHEART_prevalidated_results.rds")
+prevalidated_results_crossvalidate <- calcCVperformance(prevalidated_results_crossvalidate[[1]], "Balanced Accuracy")
+prevalidated_BA <- mean(performance(prevalidated_results_crossvalidate)$`Balanced Accuracy`)
+
+merge_results_crossvalidate <- readRDS("BioHEART_merge_results.rds")
+merge_results_crossvalidate <- calcCVperformance(merge_results_crossvalidate[[1]], "Balanced Accuracy")
+merge_BA <- mean(performance(merge_results_crossvalidate)$`Balanced Accuracy`)
+
+PCA_results_crossvalidate <- readRDS("BioHEART_PCA_results.rds")
+PCA_results_crossvalidate <- calcCVperformance(PCA_results_crossvalidate[[1]], "Balanced Accuracy")
+PCA_BA <- mean(performance(PCA_results_crossvalidate)$`Balanced Accuracy`)
+```
+
+
+```{r, eval = T}
+combined_ba_df <- data.frame(platform = c("Prevalidated", "Merge", "PCA"), 
+                             balanced_acc = c(prevalidated_BA, merge_BA, PCA_BA), 
+                             type = "Combined",
+                             tests = nrow(colData(MultiAssayExperiment)) * length(platformList))
+```
+
+
+```{r, eval = T}
+full_ba_df <- rbind(MultiP_ba_df, baseline_ba_df, combined_ba_df) 
+
+ymin = min(full_ba_df$balanced_acc)
+ymax = max(full_ba_df$balanced_acc)
+ydiff = ymax - ymin
+
+xmin = min(full_ba_df$tests)
+xmax = max(full_ba_df$tests)
+xdiff = xmax - xmin
+
+full_ba_df %>%
+  mutate(platform = factor(platform, levels = platform)) %>%
+  ggplot(aes(x = tests, y = balanced_acc, colour = type, label = platform)) +
+  geom_point(size = 3) + 
+  ggrepel::geom_text_repel(show.legend = FALSE, size = 5) +
+  labs(x = "Total Assays Collected", y = "Balanced Accuracy", colour = "Type") +
+    theme(legend.title = element_text(size = 14),
+          legend.text = element_text(size = 12),
+          axis.text=element_text(size=15),
+          axis.title=element_text(size=15),
+          plot.title=element_text(size=20))
+```
+
+## DLDA Importance plot
+
+```{r}
+DLDAloadings(MultiPresults, platformList[1])
+```
+
+
+```{r}
+sessionInfo()
+```
+

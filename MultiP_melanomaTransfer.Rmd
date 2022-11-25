@@ -1,0 +1,903 @@
+---
+title: "MultiP_Function_ClassifyR"
+author: "Andy Tran, Andy Wang & Jamie Mickaill"
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+output:
+  html_document:
+    code_folding: hide
+    self_contained: true
+    number_sections: yes
+    toc: yes
+    toc_float:
+      collapsed: yes
+      smooth_scroll: no
+always_allow_html: true
+---
+
+```{r setup}
+knitr::opts_chunk$set(echo = TRUE)
+
+suppressPackageStartupMessages({
+  library(MultiAssayExperiment)
+  library(tidyverse)
+  library(tictoc)
+  library(ClassifyR)
+  library(curatedTCGAData)
+})
+```
+
+# Melanoma (SKCM)
+
+## in house data processing
+
+```{r}
+dataDirMelanoma = "data/melanomaAssaysNorm.RData"
+load(dataDirMelanoma)
+
+#melanomaAssaysNorm <- mergeReplicates(intersectColumns(melanomaAssaysNorm))
+
+melanomaAssaysNorm = melanomaAssaysNorm[,,c("NanoString", "microRNA")]
+
+melanomaAssaysNorm$pathology_N_stage <- as.character(melanomaAssaysNorm$Prim_NStage)
+melanomaAssaysNorm$pathology_N_stage[grep("n0", melanomaAssaysNorm$pathology_N_stage, ignore.case = TRUE)] <- "N0"
+melanomaAssaysNorm$pathology_N_stage[grep("n1", melanomaAssaysNorm$pathology_N_stage, ignore.case = TRUE)] <- "N1"
+melanomaAssaysNorm$pathology_N_stage[grep("n2", melanomaAssaysNorm$pathology_N_stage, ignore.case = TRUE)] <- "N2"
+melanomaAssaysNorm$pathology_N_stage[grep("nx", melanomaAssaysNorm$pathology_N_stage, ignore.case = TRUE)] <- NA
+
+melanomaAssaysNorm$pathology_T_stage <- as.character(melanomaAssaysNorm$Prim_Tstage)
+melanomaAssaysNorm$pathology_T_stage[grep("t0", melanomaAssaysNorm$pathology_T_stage, ignore.case = TRUE)] <- "T0"
+melanomaAssaysNorm$pathology_T_stage[grep("t1", melanomaAssaysNorm$pathology_T_stage, ignore.case = TRUE)] <- "T1"
+melanomaAssaysNorm$pathology_T_stage[grep("t2", melanomaAssaysNorm$pathology_T_stage, ignore.case = TRUE)] <- "T2"
+melanomaAssaysNorm$pathology_T_stage[grep("t3", melanomaAssaysNorm$pathology_T_stage, ignore.case = TRUE)] <- "T3"
+melanomaAssaysNorm$pathology_T_stage[grep("t4", melanomaAssaysNorm$pathology_T_stage, ignore.case = TRUE)] <- "T4"
+melanomaAssaysNorm$pathology_T_stage[grep("tx", melanomaAssaysNorm$pathology_T_stage, ignore.case = TRUE)] <- NA
+
+melanomaAssaysNorm$sex <- tolower(as.character(melanomaAssaysNorm$Person_Sex))
+melanomaAssaysNorm$ulceration <- tolower(as.character(melanomaAssaysNorm$Prim_Ulc))
+melanomaAssaysNorm$Breslow_thickness <- melanomaAssaysNorm$Prim_Breslow
+melanomaAssaysNorm$age <- melanomaAssaysNorm$Age_Analysis/365
+
+#melanoma_clinical_features <- c("pathology_N_stage", "pathology_T_stage", "sex", "Breslow_thickness",)
+# melanoma_clinical_features <- c("pathology_T_stage", "sex", "Breslow_thickness", "age")
+#melanoma_clinical_features <- c("pathology_N_stage", "pathology_T_stage", "sex", "age")
+melanoma_clinical_features <- c("pathology_T_stage", "sex", "age")
+
+classes = "class1vs4years" # outcome feature
+keep_features <- colnames(colData(melanomaAssaysNorm)) %in% c(melanoma_clinical_features, classes)
+colData(melanomaAssaysNorm) <- colData(melanomaAssaysNorm)[,keep_features]
+colData(melanomaAssaysNorm) <- na.omit(colData(melanomaAssaysNorm))
+
+for(feature in melanoma_clinical_features){
+    if(class(colData(melanomaAssaysNorm)[,feature]) == "character"){
+    colData(melanomaAssaysNorm)[,feature] = as.numeric(factor(colData(melanomaAssaysNorm)[,feature]))
+    }
+}
+
+#Subset complete cases only for all assays
+melanomaAssaysNorm = melanomaAssaysNorm[,complete.cases(melanomaAssaysNorm),]
+
+dim(colData(melanomaAssaysNorm))
+melanomaAssaysNorm@ExperimentList
+```
+
+
+
+```{r, eval = TRUE}
+SKCM = curatedTCGAData(diseaseCode = "SKCM", 
+                       assays = c("RNASeq2GeneNorm", 
+                                  "miRNASeqGene"), 
+                       version = "2.0.1", 
+                       dry.run = FALSE)
+
+SKCM <- mergeReplicates(intersectColumns(SKCM))
+#names(SKCM) <- c("RNAseq", "RPPA", "GISTIC")
+
+SKCM = c(SKCM, 
+         RNASeq = SKCM@ExperimentList[["SKCM_RNASeq2GeneNorm-20160128"]], 
+         mapFrom = "SKCM_RNASeq2GeneNorm-20160128")
+
+SKCM = c(SKCM, 
+         miRNA = SKCM@ExperimentList[["SKCM_miRNASeqGene-20160128"]], 
+         mapFrom = "SKCM_miRNASeqGene-20160128")
+
+SKCM = SKCM[,,c("RNASeq", "miRNA")]
+
+experiments(SKCM)
+dim(colData(SKCM))
+
+## filter to stage 3
+met_ind <- which(str_detect(colData(SKCM)$pathologic_stage, "stage iii"))
+SKCM <- SKCM[,met_ind,]
+dim(colData(SKCM))
+
+good_ind_alive <- which(colData(SKCM)$vital_status == 0 & colData(SKCM)$days_to_last_followup > 4*365 )
+good_ind_dead <- which(colData(SKCM)$vital_status == 1 & colData(SKCM)$days_to_death > 4*365 )
+good_ind <- c(good_ind_alive, good_ind_dead)
+poor_ind <- which(colData(SKCM)$vital_status == 1 & colData(SKCM)$days_to_death < 1*365 )
+
+colData(SKCM)$Outcome <- NA
+colData(SKCM)$Outcome[good_ind] <- "Good"
+colData(SKCM)$Outcome[poor_ind] <- "Poor"
+table(SKCM$Outcome)
+
+
+#SKCM 
+SKCM$pathology_N_stage <- as.character(SKCM$pathology_N_stage)
+SKCM$pathology_N_stage[grep("n0", SKCM$pathology_N_stage, ignore.case = TRUE)] <- "N0"
+SKCM$pathology_N_stage[grep("n1", SKCM$pathology_N_stage, ignore.case = TRUE)] <- "N1"
+SKCM$pathology_N_stage[grep("n2", SKCM$pathology_N_stage, ignore.case = TRUE)] <- "N2"
+SKCM$pathology_N_stage[grep("n3", SKCM$pathology_N_stage, ignore.case = TRUE)] <- "N3"
+SKCM$pathology_N_stage[grep("nx", SKCM$pathology_N_stage, ignore.case = TRUE)] <- NA
+
+SKCM$pathology_T_stage <- as.character(SKCM$pathology_T_stage)
+SKCM$pathology_T_stage[grep("t0", SKCM$pathology_T_stage, ignore.case = TRUE)] <- "T0"
+SKCM$pathology_T_stage[grep("t1", SKCM$pathology_T_stage, ignore.case = TRUE)] <- "T1"
+SKCM$pathology_T_stage[grep("t2", SKCM$pathology_T_stage, ignore.case = TRUE)] <- "T2"
+SKCM$pathology_T_stage[grep("t3", SKCM$pathology_T_stage, ignore.case = TRUE)] <- "T3"
+SKCM$pathology_T_stage[grep("t4", SKCM$pathology_T_stage, ignore.case = TRUE)] <- "T4"
+SKCM$pathology_T_stage[grep("tx", SKCM$pathology_T_stage, ignore.case = TRUE)] <- NA
+SKCM$pathology_T_stage[grep("tis", SKCM$pathology_T_stage, ignore.case = TRUE)] <- NA
+
+SKCM$sex <- SKCM$gender
+SKCM$age <- SKCM$years_to_birth
+SKCM$ulceration <- SKCM$melanoma_ulceration
+
+#SKCM_clinical_features <- c("pathology_T_stage", "pathology_N_stage", "sex", "Breslow_thickness", "age")
+# SKCM_clinical_features <- c("pathology_T_stage", "sex", "Breslow_thickness", "age")
+#SKCM_clinical_features <- c("pathology_N_stage", "pathology_T_stage", "sex", "age")
+SKCM_clinical_features <- c("pathology_T_stage", "sex", "age")
+
+classes = "Outcome" # outcome feature
+keep_features <- colnames(colData(SKCM)) %in% c(SKCM_clinical_features, classes)
+colData(SKCM) <- colData(SKCM)[,keep_features]
+colData(SKCM) <- na.omit(colData(SKCM))
+
+for(feature in SKCM_clinical_features){
+    if(class(colData(SKCM)[,feature]) == "character"){
+    colData(SKCM)[,feature] = as.numeric(factor(colData(SKCM)[,feature]))
+    }
+}
+
+## library size normalisation as well???
+normalise <- function(counts){
+  libsizes <- colSums(counts)
+  size.factors <- libsizes/mean(libsizes)
+  normalised <- log2(t(t(counts)/size.factors) + 1)
+  return(normalised)
+}
+
+
+RNAseq <- assay(SKCM@ExperimentList[["RNASeq"]])
+assay(SKCM@ExperimentList[["RNASeq"]]) <- normalise(RNAseq)
+# keep_RNAseq <- which(apply(RNAseq, 1 , sd) > 1 & rowMeans(RNAseq) > 1)
+# SKCM <- SKCM[list(RNASeq = keep_RNAseq),,]
+
+miRNA <- assay(SKCM@ExperimentList[["miRNA"]])
+assay(SKCM@ExperimentList[["miRNA"]]) <- normalise(miRNA)
+# keep_miRNA <- which(apply(miRNA, 1 , sd) > 3 & rowMeans(miRNA) > 3) # medium filter
+keep_miRNA <- which(apply(miRNA, 1 , sd) > 5 & rowMeans(miRNA) > 5) # hard filter
+SKCM <- SKCM[list(miRNA = keep_miRNA),,]
+
+
+
+dim(colData(SKCM))
+experiments(SKCM)
+```
+
+## filter down to common genes
+
+```{r}
+SKCM_rnaseq_genes <- SKCM@ExperimentList[["RNASeq"]]@NAMES
+SKCM@ExperimentList[["RNASeq"]] <- SKCM@ExperimentList[["RNASeq"]][order(SKCM_rnaseq_genes),]
+SKCM_rnaseq_genes <- SKCM@ExperimentList[["RNASeq"]]@NAMES
+
+inHouse_targeted_genes <- rownames(melanomaAssaysNorm@ExperimentList[["NanoString"]])
+melanomaAssaysNorm@ExperimentList[["NanoString"]] <- melanomaAssaysNorm@ExperimentList[["NanoString"]][order(inHouse_targeted_genes),]
+inHouse_targeted_genes <- rownames(melanomaAssaysNorm@ExperimentList[["NanoString"]])
+
+common_genes <- intersect(SKCM_rnaseq_genes, inHouse_targeted_genes)
+
+SKCM <- SKCM[list(RNASeq = SKCM_rnaseq_genes %in% common_genes),,]
+melanomaAssaysNorm <- melanomaAssaysNorm[list(NanoString = inHouse_targeted_genes %in% common_genes),,]
+
+rownames(melanomaAssaysNorm@ExperimentList[["NanoString"]]) <- sub("-", ".", rownames(melanomaAssaysNorm@ExperimentList[["NanoString"]]), fixed = TRUE)
+rownames(SKCM@ExperimentList[["RNASeq"]]) <- sub("-", ".", rownames(SKCM@ExperimentList[["RNASeq"]]), fixed = TRUE)
+
+SKCM@ExperimentList
+melanomaAssaysNorm@ExperimentList
+```
+
+## filter down to common miRNAs
+
+```{r}
+SKCM_miRs <- SKCM@ExperimentList[["miRNA"]]@NAMES
+inHouse_miRs <- rownames(melanomaAssaysNorm@ExperimentList[["microRNA"]])
+inHouse_miRs <- sub("R", "r", inHouse_miRs)
+rownames(melanomaAssaysNorm@ExperimentList[["microRNA"]]) <- inHouse_miRs
+
+common_miRs <- intersect(SKCM_miRs, inHouse_miRs)
+
+SKCM <- SKCM[list(miRNA = SKCM_miRs %in% common_miRs),,]
+
+melanomaAssaysNorm <- melanomaAssaysNorm[list(microRNA = inHouse_miRs %in% common_miRs),,]
+
+rownames(melanomaAssaysNorm@ExperimentList[["microRNA"]]) <- sub("-", ".", rownames(melanomaAssaysNorm@ExperimentList[["microRNA"]]), fixed = TRUE)
+
+rownames(SKCM@ExperimentList[["miRNA"]]) <- sub("-", ".", rownames(SKCM@ExperimentList[["miRNA"]]), fixed = TRUE)
+
+SKCM@ExperimentList
+melanomaAssaysNorm@ExperimentList
+```
+
+
+
+## put data on same scale (RNAseq only)
+
+```{r}
+par(mfrow = c(1,2))
+boxplot(assay(SKCM@ExperimentList[["RNASeq"]]))
+boxplot(assay(melanomaAssaysNorm@ExperimentList[["NanoString"]]))
+```
+
+
+```{r}
+SKCM_RNA_t <- t(assay(SKCM@ExperimentList[["RNASeq"]]))
+MIA_RNA_t <- t(assay(melanomaAssaysNorm@ExperimentList[["NanoString"]]))
+identical(colnames(MIA_RNA_t), colnames(SKCM_RNA_t))
+
+
+SKCM_RNA_t <- log2(SKCM_RNA_t + 1)
+MIA_RNA_t <- log2(MIA_RNA_t - min(MIA_RNA_t) + 1) #min normalise as well
+
+SKCM_RNA_t_pair <- CPOP::pairwise_col_diff(SKCM_RNA_t)
+MIA_RNA_t_pair <- CPOP::pairwise_col_diff(MIA_RNA_t)
+identical(colnames(SKCM_RNA_t_pair), colnames(MIA_RNA_t_pair))
+
+
+clean_names <- function(names){gsub("-", ".", names, fixed = TRUE)}
+colnames(SKCM_RNA_t_pair) <- clean_names(colnames(SKCM_RNA_t_pair))
+colnames(MIA_RNA_t_pair) <- clean_names(colnames(MIA_RNA_t_pair))
+
+par(mfrow = c(1,2))
+boxplot(t(SKCM_RNA_t_pair))
+boxplot(t(MIA_RNA_t_pair))
+
+SKCM = c(SKCM, 
+         RNA_pair = t(SKCM_RNA_t_pair), 
+         mapFrom = "RNASeq")
+
+melanomaAssaysNorm = c(melanomaAssaysNorm, 
+                       RNA_pair = t(MIA_RNA_t_pair), 
+                       mapFrom = "NanoString")
+
+SKCM@ExperimentList
+melanomaAssaysNorm@ExperimentList
+```
+
+
+```{r}
+par(mfrow = c(1,2))
+boxplot(assay(SKCM@ExperimentList[["RNA_pair"]]))
+boxplot(assay(melanomaAssaysNorm@ExperimentList[["RNA_pair"]]))
+```
+
+```{r}
+summary(rowMeans(assay(SKCM@ExperimentList[["RNA_pair"]])))
+summary(apply(assay(SKCM@ExperimentList[["RNA_pair"]]), 1, sd))
+```
+
+
+remove low sd RNA pairs
+```{r}
+RNA_pair <- assay(SKCM@ExperimentList[["RNA_pair"]])
+keep_RNA_pair <- which(apply(RNA_pair, 1 , sd) > 0.1) ## soft filter
+# keep_RNA_pair <- which(apply(RNA_pair, 1 , sd) > 0.5)
+# keep_RNA_pair <- which(apply(RNA_pair, 1 , sd) > 1) ## hard filter
+SKCM <- SKCM[list(RNA_pair = keep_RNA_pair),,]
+melanomaAssaysNorm <- melanomaAssaysNorm[list(RNA_pair = keep_RNA_pair),,]
+```
+
+```{r}
+par(mfrow = c(1,2))
+boxplot(assay(SKCM@ExperimentList[["RNA_pair"]]))
+boxplot(assay(melanomaAssaysNorm@ExperimentList[["RNA_pair"]]))
+```
+
+
+```{r}
+assay(SKCM@ExperimentList[["RNA_pair"]]) <- scale(assay(SKCM@ExperimentList[["RNA_pair"]]))
+assay(melanomaAssaysNorm@ExperimentList[["RNA_pair"]]) <- scale(assay(melanomaAssaysNorm@ExperimentList[["RNA_pair"]]))
+
+par(mfrow = c(1,2))
+boxplot(assay(SKCM@ExperimentList[["RNA_pair"]]))
+boxplot(assay(melanomaAssaysNorm@ExperimentList[["RNA_pair"]]))
+```
+
+
+
+
+
+
+
+```{r}
+#assay(SKCM@ExperimentList[["miRNA"]]) <- scale(assay(SKCM@ExperimentList[["miRNA"]]))
+# assay(SKCM@ExperimentList[["RNASeq"]]) <- scale(assay(SKCM@ExperimentList[["RNASeq"]]))
+#assay(melanomaAssaysNorm@ExperimentList[["microRNA"]]) <- scale(assay(melanomaAssaysNorm@ExperimentList[["microRNA"]]))
+# assay(melanomaAssaysNorm@ExperimentList[["NanoString"]]) <- scale(assay(melanomaAssaysNorm@ExperimentList[["NanoString"]]))
+```
+
+```{r}
+# par(mfrow = c(1,2))
+# boxplot(assay(SKCM@ExperimentList[["RNASeq"]]))
+# boxplot(assay(melanomaAssaysNorm@ExperimentList[["NanoString"]]))
+```
+
+
+
+
+# convert miRs to log ratios
+
+```{r}
+par(mfrow = c(1,2))
+boxplot(assay(SKCM@ExperimentList[["miRNA"]]))
+boxplot(assay(melanomaAssaysNorm@ExperimentList[["microRNA"]]))
+```
+
+```{r}
+SKCM_miRNA_t <- t(assay(SKCM@ExperimentList[["miRNA"]]))
+MIA_miRNA_t <- t(assay(melanomaAssaysNorm@ExperimentList[["microRNA"]]))
+identical(colnames(MIA_miRNA_t), colnames(SKCM_miRNA_t))
+
+
+SKCM_miRNA_t <- log2(SKCM_miRNA_t + 1)
+MIA_miRNA_t <- log2(MIA_miRNA_t - min(MIA_miRNA_t) + 0.1) #min normalise as well
+
+SKCM_miRNA_t_pair <- CPOP::pairwise_col_diff(SKCM_miRNA_t)
+MIA_miRNA_t_pair <- CPOP::pairwise_col_diff(MIA_miRNA_t)
+identical(colnames(SKCM_miRNA_t_pair), colnames(MIA_miRNA_t_pair))
+
+
+clean_names <- function(names){gsub("-", ".", names, fixed = TRUE)}
+colnames(SKCM_miRNA_t_pair) <- clean_names(colnames(SKCM_miRNA_t_pair))
+colnames(MIA_miRNA_t_pair) <- clean_names(colnames(MIA_miRNA_t_pair))
+
+par(mfrow = c(1,2))
+boxplot(t(SKCM_miRNA_t_pair))
+boxplot(t(MIA_miRNA_t_pair))
+
+SKCM = c(SKCM, 
+         miRNA_pair = t(SKCM_miRNA_t_pair), 
+         mapFrom = "miRNA")
+
+melanomaAssaysNorm = c(melanomaAssaysNorm, 
+                       miRNA_pair = t(MIA_miRNA_t_pair), 
+                       mapFrom = "microRNA")
+
+SKCM@ExperimentList
+melanomaAssaysNorm@ExperimentList
+```
+
+
+```{r}
+par(mfrow = c(1,2))
+boxplot(assay(SKCM@ExperimentList[["miRNA_pair"]]))
+boxplot(assay(melanomaAssaysNorm@ExperimentList[["miRNA_pair"]]))
+```
+
+```{r}
+summary(rowMeans(assay(SKCM@ExperimentList[["miRNA_pair"]])))
+summary(apply(assay(SKCM@ExperimentList[["miRNA_pair"]]), 1, sd))
+```
+
+
+remove low sd miRs
+```{r}
+miRNA_pair <- assay(SKCM@ExperimentList[["miRNA_pair"]])
+keep_miRNA_pair <- which(apply(miRNA_pair, 1 , sd) > 0.1) ## soft filter
+# keep_miRNA_pair <- which(apply(miRNA_pair, 1 , sd) > 0.5)
+# keep_miRNA_pair <- which(apply(miRNA_pair, 1 , sd) > 1) ## hard filter
+SKCM <- SKCM[list(miRNA_pair = keep_miRNA_pair),,]
+melanomaAssaysNorm <- melanomaAssaysNorm[list(miRNA_pair = keep_miRNA_pair),,]
+```
+
+```{r}
+par(mfrow = c(1,2))
+boxplot(assay(SKCM@ExperimentList[["miRNA_pair"]]))
+boxplot(assay(melanomaAssaysNorm@ExperimentList[["miRNA_pair"]]))
+```
+
+
+```{r}
+assay(SKCM@ExperimentList[["miRNA_pair"]]) <- scale(assay(SKCM@ExperimentList[["miRNA_pair"]]))
+assay(melanomaAssaysNorm@ExperimentList[["miRNA_pair"]]) <- scale(assay(melanomaAssaysNorm@ExperimentList[["miRNA_pair"]]))
+
+par(mfrow = c(1,2))
+boxplot(assay(SKCM@ExperimentList[["miRNA_pair"]]))
+boxplot(assay(melanomaAssaysNorm@ExperimentList[["miRNA_pair"]]))
+```
+
+
+rename mirna pairs
+
+```{r}
+head(rownames(assay(SKCM@ExperimentList[["miRNA_pair"]])))
+
+```
+
+
+
+
+# Train on SKCM 
+
+```{r}
+source("./MultiP-algm.R")
+source("./MultiP-summary.R")
+
+MultiAssayExperiment = SKCM
+
+properties = c("TSA.retained", "Cost.Total")
+properties_direction = c("high", "low") # best outcome of property
+weights = c(0.5, 0.5)
+confidenceCutoff = 0.1
+
+# platformList = c("sampleInfo", "microRNA", "NanoString") 
+# platformUnitCosts = c(50, 100, 100)
+
+platformUnitCosts = c(100, 400, 200)
+platformList = c("clinical", "RNA_pair", "miRNA_pair")
+
+fixedPlatforms = 1
+minPlatformSize = 5
+performanceType = "Sample Error"
+
+characteristics = NULL
+seed=1
+verbose=0
+folds = 2
+permutations = 50
+
+crossValParams = CrossValParams(
+    samplesSplits = "Permute k-Fold",
+    permutations = 50,
+    folds = 2,
+    tuneMode = "none",
+    parallelParams = SnowParam(workers = 2, RNGseed = seed)
+)
+
+modellingParams = ModellingParams(
+    balancing = "none",
+    transformParams  = NULL,
+    selectParams = SelectParams("t-test"),
+    trainParams = TrainParams("DLDA"),
+    predictParams = PredictParams("DLDA"),
+    doImportance = FALSE
+)
+```
+
+
+
+
+# Main Code
+
+```{r main, message = FALSE, warning = FALSE}
+#filter NA's for class
+classColumn = grep(classes, colnames(colData(MultiAssayExperiment)))
+retainList = as.vector(!is.na(colData(MultiAssayExperiment)[classColumn]))
+MultiAssayExperiment = MultiAssayExperiment[,retainList & !is.na(retainList),]
+
+#Subset specified experiments from platformList 
+MultiAssayExperiment = MultiAssayExperiment[,,platformList[platformList != "clinical"]]
+
+#Subset complete cases only for all assays
+MultiAssayExperiment = MultiAssayExperiment[,complete.cases(MultiAssayExperiment),]
+
+dim(colData(MultiAssayExperiment))
+```
+
+```{r}
+tic()
+#set.seed(seed)
+MultiPresults = MultiP.algm(MultiAssayExperiment,
+                        platformList,fixedPlatforms,confidenceCutoff,
+                        platformUnitCosts = platformUnitCosts , performanceType = performanceType,
+                       classes = classes, crossValParams = crossValParams, modellingParams = modellingParams, characteristics = characteristics, minPlatformSize = minPlatformSize, seed = seed, verbose = verbose)
+toc()
+```
+
+# Diagnostics
+
+## Table
+```{r}
+summaryTable(MultiPresults)
+```
+
+
+## Bubble plot
+```{r}
+bubblePlot(MultiPresults, nVis = 8)
+```
+
+
+## Strata plot
+```{r}
+top_sequence = topBAccSequence(MultiPresults)
+strataPlot(MultiPresults, top_sequence)
+```
+
+
+## Flow Chart
+```{r}
+top_sequence = topBAccSequence(MultiPresults)
+flowChart(MultiPresults, top_sequence)
+```
+
+
+## Cohort Summary
+
+```{r}
+## convert numeric clinical variables back to categorical
+# categorical_features = c"pathology_N_stage", "pathology_T_stage", "sex")
+categorical_features = c("pathology_T_stage", "sex")
+for(feature in categorical_features){
+  colData(MultiPresults$MultiAssayExperiment)[,feature] = factor(colData(MultiPresults$MultiAssayExperiment)[,feature]-1)
+}
+```
+
+### stage 1
+```{r}
+top_sequence = topBAccSequence(MultiPresults)
+platform_of_interest = strsplit(top_sequence, "-")[[1]][1]
+variables_of_interest = c("pathology_T_stage", "sex", "age")
+cohortSummary(MultiPresults, top_sequence, platform_of_interest, variables_of_interest)
+```
+
+
+### stage 2
+```{r}
+platform_of_interest = strsplit(top_sequence, "-")[[1]][2]
+cohortSummary(MultiPresults, top_sequence, platform_of_interest, variables_of_interest)
+```
+
+
+## Baseline
+
+```{r}
+for(platform in platformList){
+results <-  modelsPredict(MultiAssayExperiment,
+                         MultiPresults$generatedModelsResults,
+                         platform,
+                         classes, 
+                         minPlatformSize,
+                         verbose)
+predict_class <- results$SSER$predict_class
+true_class <- as.character(colData(MultiAssayExperiment)[,classes])
+print(paste0("Platform: ", platform, 
+             ", Accuracy:", round(mean(true_class == predict_class),3),
+             ", Balanced Accuracy:", round(balanced_accuracy(true_class, predict_class),3)))
+}
+
+```
+
+```{r}
+top_sequence = topBAccSequence(MultiPresults)
+nperm_SKCM = which(MultiPresults$TSER.summary$Platform.Sequence == top_sequence)[1]
+stra_SKCM = MultiPresults$Results.stratification[[nperm_SKCM]] %>% filter(strata == "Retained")
+classification_metrics(stra_SKCM$predict_class, stra_SKCM$true_class)
+
+caret::confusionMatrix(data = factor(stra_SKCM$predict_class), reference = factor(stra_SKCM$true_class), positive = "Poor")
+```
+
+
+
+## apply model onto new data
+
+```{r}
+resultList = list()
+```
+
+```{r}
+table(melanomaAssaysNorm$pathology_T_stage)
+table(SKCM$pathology_T_stage)
+```
+
+
+```{r}
+newData = DataFrame(colData(melanomaAssaysNorm)[,-1])
+n_models = folds * permutations
+newResults <- data.frame(sample = character(), class = character())
+
+
+for(i in 1:n_models){
+  result = modellingParams@predictParams@predictor(MultiPresults$generatedModels$clinical[[i]], newData) %>% suppressMessages
+  newResults_temp <- data.frame(sample = rownames(result), class = result$class)
+  newResults <- rbind(newResults, newResults_temp)
+}
+
+sampleIDs = rownames(colData(melanomaAssaysNorm))
+pred_table <- table(newResults$sample, newResults$class)
+
+class1 <- colnames(pred_table)[1]
+class2 <- colnames(pred_table)[2]
+class1_preds = pred_table[,1]
+class1_preds = class1_preds[sampleIDs]
+class2_preds = pred_table[,2]
+class2_preds = class2_preds[sampleIDs]
+
+preds <- data.frame(sampleID = sampleIDs, class1_pred = class1_preds, class2_pred = class2_preds)
+preds <- preds %>% 
+  mutate(predict_class = ifelse(class1_pred > class2_pred, class1, class2),
+         true_class = as.character(colData(melanomaAssaysNorm)$class1vs4years)) %>% 
+  mutate(sser = ifelse(class1 == true_class, class2_pred/n_models, class1_pred/n_models))
+summary(preds$sser)
+print(paste0("Accuracy:", round(mean(preds$true_class == preds$predict_class),3),
+             ", Balanced Accuracy:", round(balanced_accuracy(preds$true_class, preds$predict_class),3)))
+
+resultList[["clinical"]] = preds
+```
+
+```{r}
+newData = DataFrame(t(melanomaAssaysNorm@ExperimentList[["RNA_pair"]]))
+colnames(newData) <- paste0("RNA_pair_",colnames(newData))
+
+n_models = folds * permutations
+newResults <- data.frame(sample = character(), class = character())
+
+
+for(i in 1:n_models){
+  result = modellingParams@predictParams@predictor(MultiPresults$generatedModels$RNA_pair[[i]], newData) %>% suppressMessages
+  newResults_temp <- data.frame(sample = rownames(result), class = result$class)
+  newResults <- rbind(newResults, newResults_temp)
+}
+
+sampleIDs = rownames(colData(melanomaAssaysNorm))
+pred_table <- table(newResults$sample, newResults$class)
+
+class1 <- colnames(pred_table)[1]
+class2 <- colnames(pred_table)[2]
+class1_preds = pred_table[,1]
+class1_preds = class1_preds[sampleIDs]
+class2_preds = pred_table[,2]
+class2_preds = class2_preds[sampleIDs]
+
+preds <- data.frame(sampleID = sampleIDs, class1_pred = class1_preds, class2_pred = class2_preds)
+preds <- preds %>% 
+  mutate(predict_class = ifelse(class1_pred > class2_pred, class1, class2),
+         true_class = as.character(colData(melanomaAssaysNorm)$class1vs4years)) %>% 
+  mutate(sser = ifelse(class1 == true_class, class2_pred/n_models, class1_pred/n_models))
+summary(preds$sser)
+print(paste0("Accuracy:", round(mean(preds$true_class == preds$predict_class, na.rm = TRUE),3),
+             ", Balanced Accuracy:", round(balanced_accuracy(preds$true_class, preds$predict_class),3)))
+
+
+resultList[["RNA_pair"]] = preds
+```
+
+
+```{r}
+newData = melanomaAssaysNorm@ExperimentList[["miRNA_pair"]] %>% assay %>% t %>% DataFrame
+colnames(newData) <- paste0("miRNA_pair_",colnames(newData))
+
+n_models = folds * permutations
+newResults <- data.frame(sample = character(), class = character())
+
+
+for(i in 1:n_models){
+  result = modellingParams@predictParams@predictor(MultiPresults$generatedModels$miRNA_pair[[i]], newData) %>% suppressMessages
+  newResults_temp <- data.frame(sample = rownames(result), class = result$class)
+  newResults <- rbind(newResults, newResults_temp)
+}
+
+sampleIDs = rownames(colData(melanomaAssaysNorm))
+pred_table <- table(newResults$sample, newResults$class)
+
+class1 <- colnames(pred_table)[1]
+class2 <- colnames(pred_table)[2]
+class1_preds = pred_table[,1]
+class1_preds = class1_preds[sampleIDs]
+class2_preds = pred_table[,2]
+class2_preds = class2_preds[sampleIDs]
+
+preds <- data.frame(sampleID = sampleIDs, class1_pred = class1_preds, class2_pred = class2_preds)
+preds <- preds %>% 
+  mutate(predict_class = ifelse(class1_pred > class2_pred, class1, class2),
+         true_class = as.character(colData(melanomaAssaysNorm)$class1vs4years)) %>% 
+  mutate(sser = ifelse(class1 == true_class, class2_pred/n_models, class1_pred/n_models))
+summary(preds$sser)
+print(paste0("Accuracy:", round(mean(preds$true_class == preds$predict_class, na.rm = TRUE),3),
+             ", Balanced Accuracy:", round(balanced_accuracy(preds$true_class, preds$predict_class),3)))
+
+resultList[["miRNA_pair"]] = preds
+```
+
+## passing through tree
+
+```{r}
+set.seed(seed)
+MultiPresults_predict <- MultiP.algm(melanomaAssaysNorm,
+                      platformList = c("clinical", "miRNA_pair", "RNA_pair"), 
+                      fixedPlatforms = 1,
+                      confidenceCutoff,
+                      platformUnitCosts = c("clinical" = 100, "miRNA_pair" = 400, "RNA_pair" = 200), 
+                      performanceType = "Sample Error",
+                      classes = "class1vs4years", 
+                      crossValParams = crossValParams, 
+                      modellingParams = modellingParams, 
+                      characteristics = characteristics, 
+                      minPlatformSize = 3, 
+                      seed=seed, verbose=verbose, predict = TRUE, resultList = resultList)
+```
+
+# Diagnostics
+
+## Table
+```{r}
+summaryTable(MultiPresults_predict)
+```
+
+
+## Bubble plot
+```{r}
+bubblePlot(MultiPresults_predict, nVis = 8)
+```
+
+
+## Strata plot
+```{r}
+top_sequence = topBAccSequence(MultiPresults)
+strataPlot(MultiPresults_predict, top_sequence)
+```
+
+
+## Flow Chart
+```{r}
+top_sequence = topBAccSequence(MultiPresults)
+flowChart(MultiPresults_predict, top_sequence)
+```
+
+## feature importance
+```{r}
+feat = platformList[1]
+featureImportance(MultiPresults, feat, 20)
+
+feat = platformList[2]
+featureImportance(MultiPresults, feat, 20)
+
+feat = platformList[3]
+featureImportance(MultiPresults, feat, 20)
+```
+
+```{r}
+library(ggraph)
+library(igraph)
+
+selected_features  <- MultiPresults$generatedModelsFeatures[["miRNA_pair"]] 
+
+selected_features$node1 <- sapply(selected_features$Feature, function(x) strsplit(x, "--")[[1]][1])
+selected_features$node2 <- sapply(selected_features$Feature, function(x) strsplit(x, "--")[[1]][2])
+
+miRNA_pair_SKCM <- assay(MultiAssayExperiment@ExperimentList[["miRNA_pair"]])
+miRNA_pair_SKCM <- miRNA_pair_SKCM[selected_features$Feature,] %>% t
+CAD_inds <- colData(MultiAssayExperiment)$Outcome
+poor_means <- colMeans(miRNA_pair_SKCM[CAD_inds == "Poor",])
+good_means <- colMeans(miRNA_pair_SKCM[CAD_inds == "Good",])
+
+# %>% 
+#   mutate(CAD = colData(MultiAssayExperiment)$Outcome) %>%
+#   group_by(CAD) %>%
+#   summarise_all(mean)
+# CAD_levels = miRNA_pair_SKCM_means$CAD
+# miRNA_pair_SKCM_means <- miRNA_pair_SKCM_means %>% select(-CAD) %>% t %>% data.frame
+# colnames(miRNA_pair_SKCM_means) <- CAD_levels
+
+miRNA_pair_SKCM_means = data.frame(Good = good_means, Poor = poor_means)
+rownames(miRNA_pair_SKCM_means) = colnames(miRNA_pair_SKCM)
+miRNA_pair_SKCM_means <- mutate(miRNA_pair_SKCM_means, Diff = Good - Poor) %>% arrange(-abs(Diff)) %>% head(30)
+
+miRNA_pair_SKCM_means$node1 <- sapply(rownames(miRNA_pair_SKCM_means), function(x) strsplit(x, "..", fixed = TRUE)[[1]][1])
+miRNA_pair_SKCM_means$node2 <- sapply(rownames(miRNA_pair_SKCM_means), function(x) strsplit(x, "..", fixed = TRUE)[[1]][2])
+
+# identical(rownames(miRNA_pair_SKCM_means), gsub("-", ".", selected_features$Feature, fixed = TRUE))
+# selected_features$Diff <- miRNA_pair_SKCM_means$Diff
+miRNA_pair_SKCM_means <- select(miRNA_pair_SKCM_means, c("node1", "node2", "Diff"))
+
+graph <- graph_from_data_frame(miRNA_pair_SKCM_means)
+ggraph(graph, layout = "linear", circular = TRUE) +
+      ggraph::geom_edge_arc(aes(
+        start_cap = label_rect(.data$node1.name),
+        end_cap = label_rect(.data$node2.name),
+        # width = .data$Freq,
+        width = abs(.data$Diff),
+        colour = factor(sign(.data$Diff), levels = c(1, -1), labels = c("Downregulated", "Upregulated"))))  +
+      ggraph::scale_edge_colour_brewer(palette = "Set1", direction = -1, name="Direction") +
+      ggraph::scale_edge_width_continuous(name = "Loading") +
+      ggraph::geom_node_text(aes(label = sub("hsa.mir.", "", .data$name, fixed = TRUE)), size = 4.5) + 
+      theme_graph(border = FALSE) #, plot_margin = ggplot2::margin(30, 50, 30, 50))
+
+```
+
+
+```{r}
+selected_features  <- MultiPresults$generatedModelsFeatures[["RNA_pair"]] 
+
+selected_features$node1 <- sapply(selected_features$Feature, function(x) strsplit(x, "--")[[1]][1])
+selected_features$node2 <- sapply(selected_features$Feature, function(x) strsplit(x, "--")[[1]][2])
+
+miRNA_pair_SKCM <- assay(MultiAssayExperiment@ExperimentList[["RNA_pair"]])
+miRNA_pair_SKCM <- miRNA_pair_SKCM[selected_features$Feature,] %>% t
+CAD_inds <- colData(MultiAssayExperiment)$Outcome
+poor_means <- colMeans(miRNA_pair_SKCM[CAD_inds == "Poor",])
+good_means <- colMeans(miRNA_pair_SKCM[CAD_inds == "Good",])
+
+
+miRNA_pair_SKCM_means = data.frame(Good = good_means, Poor = poor_means)
+rownames(miRNA_pair_SKCM_means) = colnames(miRNA_pair_SKCM)
+miRNA_pair_SKCM_means <- mutate(miRNA_pair_SKCM_means, Diff = Good - Poor) %>% arrange(-abs(Diff)) %>% head(30)
+
+miRNA_pair_SKCM_means$node1 <- sapply(rownames(miRNA_pair_SKCM_means), function(x) strsplit(x, "..", fixed = TRUE)[[1]][1])
+miRNA_pair_SKCM_means$node2 <- sapply(rownames(miRNA_pair_SKCM_means), function(x) strsplit(x, "..", fixed = TRUE)[[1]][2])
+
+
+miRNA_pair_SKCM_means <- select(miRNA_pair_SKCM_means, c("node1", "node2", "Diff"))
+
+graph <- graph_from_data_frame(miRNA_pair_SKCM_means)
+ggraph(graph, layout = "linear", circular = TRUE) +
+      ggraph::geom_edge_arc(aes(
+        start_cap = label_rect(.data$node1.name),
+        end_cap = label_rect(.data$node2.name),
+        # width = .data$Freq,
+        width = abs(.data$Diff),
+        colour = factor(sign(.data$Diff), levels = c(1, -1), labels = c("Downregulated", "Upregulated"))))  +
+      ggraph::scale_edge_colour_brewer(palette = "Set1", direction = -1, name="Direction") +
+      ggraph::scale_edge_width_continuous(name = "Loading") +
+      ggraph::geom_node_text(aes(label = .data$name), size = 3) + 
+      theme_graph(border = FALSE) #, plot_margin = ggplot2::margin(30, 50, 30, 50))
+
+```
+
+## Cohort Summary
+
+```{r}
+## convert numeric clinical variables back to categorical
+categorical_features = c("pathology_T_stage", "sex")
+for(feature in categorical_features){
+  colData(MultiPresults_predict$MultiAssayExperiment)[,feature] = factor(colData(MultiPresults_predict$MultiAssayExperiment)[,feature]-1)
+}
+```
+
+### stage 1
+```{r}
+top_sequence = topBAccSequence(MultiPresults)
+platform_of_interest = strsplit(top_sequence, "-")[[1]][1]
+cohortSummary(MultiPresults_predict, top_sequence, platform_of_interest, variables_of_interest)
+```
+
+
+### stage 2
+```{r}
+platform_of_interest = strsplit(top_sequence, "-")[[1]][2]
+cohortSummary(MultiPresults_predict, top_sequence, platform_of_interest, variables_of_interest)
+```
+
+```{r}
+top_sequence = topBAccSequence(MultiPresults)
+nperm_MIA = which(MultiPresults_predict$TSER.summary$Platform.Sequence == top_sequence)[1]
+stra_MIA = MultiPresults_predict$Results.stratification[[nperm_MIA]] %>% filter(strata == "Retained")
+classification_metrics(stra_MIA$predict_class, stra_MIA$true_class)
+caret::confusionMatrix(data = factor(stra_MIA$predict_class), reference = factor(stra_MIA$true_class), positive = "Poor")
+```
+
+
+## DLDA Importance plot
+
+```{r}
+DLDAloadings(MultiPresults, platformList[1])
+DLDAloadings(MultiPresults, platformList[2])
+DLDAloadings(MultiPresults, platformList[3])
+```
+
+
+
+```{r}
+sessionInfo()
+```
+
