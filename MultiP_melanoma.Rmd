@@ -1,5 +1,5 @@
 ---
-title: "MultiP_Function_ClassifyR"
+title: "MultiP Demonstration on melanoma data"
 author: "Andy Tran, Andy Wang & Jamie Mickaill"
 date: "`r format(Sys.time(), '%d %B, %Y')`"
 output:
@@ -791,7 +791,7 @@ good_means <- colMeans(miRNA_pair_SKCM[CAD_inds == "Good",])
 
 miRNA_pair_SKCM_means = data.frame(Good = good_means, Poor = poor_means)
 rownames(miRNA_pair_SKCM_means) = colnames(miRNA_pair_SKCM)
-miRNA_pair_SKCM_means <- mutate(miRNA_pair_SKCM_means, Diff = Good - Poor) %>% arrange(-abs(Diff)) %>% head(30)
+miRNA_pair_SKCM_means <- dplyr::mutate(miRNA_pair_SKCM_means, Diff = Good - Poor) %>% dplyr::arrange(-abs(Diff)) %>% head(30)
 
 miRNA_pair_SKCM_means$node1 <- sapply(rownames(miRNA_pair_SKCM_means), function(x) strsplit(x, "..", fixed = TRUE)[[1]][1])
 miRNA_pair_SKCM_means$node2 <- sapply(rownames(miRNA_pair_SKCM_means), function(x) strsplit(x, "..", fixed = TRUE)[[1]][2])
@@ -831,7 +831,7 @@ good_means <- colMeans(miRNA_pair_SKCM[CAD_inds == "Good",])
 
 miRNA_pair_SKCM_means = data.frame(Good = good_means, Poor = poor_means)
 rownames(miRNA_pair_SKCM_means) = colnames(miRNA_pair_SKCM)
-miRNA_pair_SKCM_means <- mutate(miRNA_pair_SKCM_means, Diff = Good - Poor) %>% arrange(-abs(Diff)) %>% head(30)
+miRNA_pair_SKCM_means <- dplyr::mutate(miRNA_pair_SKCM_means, Diff = Good - Poor) %>% dplyr::arrange(-abs(Diff)) %>% head(30)
 
 miRNA_pair_SKCM_means$node1 <- sapply(rownames(miRNA_pair_SKCM_means), function(x) strsplit(x, "..", fixed = TRUE)[[1]][1])
 miRNA_pair_SKCM_means$node2 <- sapply(rownames(miRNA_pair_SKCM_means), function(x) strsplit(x, "..", fixed = TRUE)[[1]][2])
