@@ -25,7 +25,6 @@ suppressPackageStartupMessages({
 })
 ```
 
-
 # BioHEART
 
 ```{r, eval = TRUE}
@@ -42,14 +41,6 @@ bioheart_mae$CAD <- factor(as.numeric(bioheart_mae$Gensini > 0), levels = c(0,1)
 classes <- "CAD"
 
 clinical <- readxl::read_excel("data/BioCT-DL_20220209.xlsx")
-# load("data/FRS_data.RData")
-#   
-# ## filter out statin
-# clinical <- filter(clinical, record_id %in% dat_FRS$record_id)
-# identical(clinical$record_id, dat_FRS$record_id)
-# clinical$FRS <- dat_FRS$cvd_FRS
-# summary(clinical$FRS)
-# clinical <- filter(clinical, FRS < 0.2)
 clinical <- filter(clinical, statin == 0)
 
 mae_id <- rownames(colData(bioheart_mae))
@@ -115,7 +106,6 @@ modellingParams = ModellingParams(
 )
 ```
 
-
 # Main Code
 
 ```{r main, message = FALSE, warning = FALSE}
@@ -151,24 +141,26 @@ toc()
 # Diagnostics
 
 ## Table
+
 ```{r}
 summaryTable(MultiPresults)
 ```
 
-
 ## Bubble plot
+
 ```{r}
 bubblePlot(MultiPresults, nVis = 8)
 ```
 
-
 ## Strata plot
+
 ```{r}
 top_sequence = topBAccSequence(MultiPresults)
 strataPlot(MultiPresults, top_sequence)
 ```
 
 ## Flow Chart
+
 ```{r}
 top_sequence = topBAccSequence(MultiPresults)
 flowChart(MultiPresults, top_sequence)
@@ -185,6 +177,7 @@ for(feature in bioheart_categorical_features){
 ```
 
 ### stage 1
+
 ```{r}
 top_sequence = topBAccSequence(MultiPresults)
 platform_of_interest = strsplit(top_sequence, "-")[[1]][1]
@@ -192,20 +185,22 @@ variables_of_interest = c("height", "smurfs", "cvhx_htn", "cvhx_hcl_sr", "smokin
 cohortSummary(MultiPresults, top_sequence, platform_of_interest, variables_of_interest = variables_of_interest)
 ```
 
-
 ### stage 2
+
 ```{r}
 platform_of_interest = strsplit(top_sequence, "-")[[1]][2]
 cohortSummary(MultiPresults, top_sequence, platform_of_interest, variables_of_interest = variables_of_interest)
 ```
 
 ### stage 3
+
 ```{r}
 platform_of_interest = strsplit(top_sequence, "-")[[1]][3]
 cohortSummary(MultiPresults, top_sequence, platform_of_interest, variables_of_interest = variables_of_interest)
 ```
 
 ## feature importance
+
 ```{r}
 feat = platformList[1]
 featureImportance(MultiPresults, feat, 20)
@@ -220,7 +215,6 @@ feat = platformList[4]
 featureImportance(MultiPresults, feat, 20)
 ```
 
-
 ## Baseline
 
 ```{r}
@@ -231,33 +225,7 @@ MultiP_ba_df <- data.frame(platform = abbreviate(MultiPresults$TSER.summary$Plat
                          tests = pathway_tests) %>% arrange(-balanced_acc)
 ```
 
-```{r}
-BAs <- c()
-for(platform in platformList){
-results <-  modelsPredict(MultiAssayExperiment,
-                         MultiPresults$generatedModelsResults,
-                         platform,
-                         classes, 
-                         minPlatformSize,
-                         verbose)
-predict_class <- results$SSER$predict_class
-true_class <- as.character(colData(MultiAssayExperiment)[,classes])
-BA <- balanced_accuracy(true_class, predict_class)
-BAs <- c(BAs, BA)
-print(paste0("Platform: ", platform, 
-             ", Accuracy:", round(mean(true_class == predict_class),3),
-             ", Balanced Accuracy:", round(BA,3)))
-}
-
-baseline_ba_df <- data.frame(platform = platformList, 
-                             balanced_acc = BAs, 
-                             type = "Single", 
-                             tests = nrow(colData(MultiAssayExperiment)))
-baseline_ba_df
-```
-
-
-```{r, eval = F}
+```{r, eval = T}
 clinmap <- data.frame(primary = rownames(colData(MultiAssayExperiment)),
     colname = rownames(colData(MultiAssayExperiment)), stringsAsFactors = FALSE)
 listmap <- list(clinical = clinmap)
@@ -274,14 +242,15 @@ MultiAssayExperiment_withClin@ExperimentList
 MultiAssayExperiment_withClin@sampleMap
 
 tic()
-prevalidated_results_crossvalidate <- crossValidate(
+merge_metabolomics_results_crossvalidate <- crossValidate(
   MultiAssayExperiment_withClin,
   outcome = classes,
   selectionMethod = "t-test",
   selectionOptimisation = "Resubstitution",
   classifier = "DLDA",
-  multiViewMethod = "prevalidation",
-  assayCombinations = "all",
+  multiViewMethod = "merge",
+  # assayCombinations = list(c("clinical", "Metabolomics"), c("clinical", "Proteomics"), c("clinical", "Lipidomics"), c("all")),
+  assayCombinations = c("clinical", "Metabolomics"),
   nFolds = 2,
   nRepeats = 50,
   nCores = 1
@@ -289,7 +258,37 @@ prevalidated_results_crossvalidate <- crossValidate(
 toc()
 
 tic()
-merge_results_crossvalidate <- crossValidate(
+merge_proteomics_results_crossvalidate <- crossValidate(
+  MultiAssayExperiment_withClin,
+  outcome = classes,
+  selectionMethod = "t-test",
+  selectionOptimisation = "Resubstitution",
+  classifier = "DLDA",
+  multiViewMethod = "merge",
+  assayCombinations = c("clinical", "Proteomics"),
+  nFolds = 2,
+  nRepeats = 50,
+  nCores = 1
+)
+toc()
+
+tic()
+merge_lipidomics_results_crossvalidate <- crossValidate(
+  MultiAssayExperiment_withClin,
+  outcome = classes,
+  selectionMethod = "t-test",
+  selectionOptimisation = "Resubstitution",
+  classifier = "DLDA",
+  multiViewMethod = "merge",
+  assayCombinations = c("clinical", "Lipidomics"),
+  nFolds = 2,
+  nRepeats = 50,
+  nCores = 1
+)
+toc()
+
+tic()
+merge_all_results_crossvalidate <- crossValidate(
   MultiAssayExperiment_withClin,
   outcome = classes,
   selectionMethod = "t-test",
@@ -303,48 +302,40 @@ merge_results_crossvalidate <- crossValidate(
 )
 toc()
 
-tic()
-PCA_results_crossvalidate <- crossValidate(
-  MultiAssayExperiment_withClin,
-  outcome = classes,
-  selectionMethod = "t-test",
-  selectionOptimisation = "Resubstitution",
-  classifier = "DLDA",
-  multiViewMethod = "PCA",
-  assayCombinations = "all",
-  nFolds = 2,
-  nRepeats = 50,
-  nCores = 1
-)
-toc()
-
-saveRDS(prevalidated_results_crossvalidate, "BioHEART_prevalidated_results.rds")
-saveRDS(merge_results_crossvalidate, "BioHEART_merge_results.rds")
-saveRDS(PCA_results_crossvalidate, "BioHEART_PCA_results.rds")
-```
-
-```{r, eval = T}
-prevalidated_results_crossvalidate <- readRDS("BioHEART_prevalidated_results.rds")
-prevalidated_results_crossvalidate <- calcCVperformance(prevalidated_results_crossvalidate[[1]], "Balanced Accuracy")
-prevalidated_BA <- mean(performance(prevalidated_results_crossvalidate)$`Balanced Accuracy`)
-
-merge_results_crossvalidate <- readRDS("BioHEART_merge_results.rds")
-merge_results_crossvalidate <- calcCVperformance(merge_results_crossvalidate[[1]], "Balanced Accuracy")
-merge_BA <- mean(performance(merge_results_crossvalidate)$`Balanced Accuracy`)
-
-PCA_results_crossvalidate <- readRDS("BioHEART_PCA_results.rds")
-PCA_results_crossvalidate <- calcCVperformance(PCA_results_crossvalidate[[1]], "Balanced Accuracy")
-PCA_BA <- mean(performance(PCA_results_crossvalidate)$`Balanced Accuracy`)
 ```
 
 
+
+
 ```{r, eval = T}
-combined_ba_df <- data.frame(platform = c("Prevalidated", "Merge", "PCA"), 
-                             balanced_acc = c(prevalidated_BA, merge_BA, PCA_BA), 
+merge_all_results_crossvalidate <- calcCVperformance(merge_all_results_crossvalidate[[1]], "Balanced Accuracy")
+merge_all_BA <- mean(performance(merge_all_results_crossvalidate)$`Balanced Accuracy`)
+
+merge_metabolomics_results_crossvalidate <- calcCVperformance(merge_metabolomics_results_crossvalidate[[1]], "Balanced Accuracy")
+merge_metabolomics_BA <- mean(performance(merge_metabolomics_results_crossvalidate)$`Balanced Accuracy`)
+
+merge_proteomics_results_crossvalidate <- calcCVperformance(merge_proteomics_results_crossvalidate[[1]], "Balanced Accuracy")
+merge_proteomics_BA <- mean(performance(merge_proteomics_results_crossvalidate)$`Balanced Accuracy`)
+
+merge_lipidomics_results_crossvalidate <- calcCVperformance(merge_lipidomics_results_crossvalidate[[1]], "Balanced Accuracy")
+merge_lipidomics_BA <- mean(performance(merge_lipidomics_results_crossvalidate)$`Balanced Accuracy`)
+```
+
+```{r, eval = T}
+combined_ba_df <- data.frame(platform = c("All"), 
+                             balanced_acc = c(merge_all_BA), 
                              type = "Combined",
                              tests = nrow(colData(MultiAssayExperiment)) * length(platformList))
+combined_ba_df
 ```
 
+```{r}
+baseline_ba_df <- data.frame(platform = c("Metabolomics", "Proteomics", "Lipidomics"), 
+                             balanced_acc = c(merge_metabolomics_BA, merge_proteomics_BA, merge_lipidomics_BA), 
+                             type = "Single", 
+                             tests = nrow(colData(MultiAssayExperiment)))
+baseline_ba_df
+```
 
 ```{r, eval = T}
 full_ba_df <- rbind(MultiP_ba_df, baseline_ba_df, combined_ba_df) 
@@ -376,8 +367,6 @@ full_ba_df %>%
 DLDAloadings(MultiPresults, platformList[1])
 ```
 
-
 ```{r}
 sessionInfo()
 ```
-
